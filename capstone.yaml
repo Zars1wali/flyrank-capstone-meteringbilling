@@ -1,0 +1,36 @@
+name: flyrank-capstone-meteringbilling
+description: Usage-based metering and billing API
+
+run: npm start
+seed: npm run seed
+test: npm test
+base_url: http://localhost:3000
+
+endpoints:
+  - method: GET
+    path: /
+    description: API info
+  - method: GET
+    path: /health
+    description: Health check
+  - method: POST
+    path: /api/usage
+    description: Record usage event
+  - method: GET
+    path: /api/usage
+    description: List usage events
+  - method: POST
+    path: /api/customers
+    description: Create customer
+  - method: GET
+    path: /api/customers
+    description: List customers
+  - method: GET
+    path: /api/customers/:id
+    description: Get customer by ID
+  - method: POST
+    path: /api/billing/calculate
+    description: Calculate bill for customer
+  - method: GET
+    path: /api/billing/:customerId
+    description: Get billing summary
