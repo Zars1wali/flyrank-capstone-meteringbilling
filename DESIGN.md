@@ -1,6 +1,5 @@
 # System Design Document: Usage Metering & Billing Engine
 
-**Author**: Antigravity & Engineering Team  
 **Status**: Approved (Phase 1 Gate)  
 **Target Stack**: Node.js + Express, PostgreSQL (via Docker), Stripe CLI (Test Mode)
 
