@@ -13,7 +13,11 @@ Every SaaS platform must reliably answer three fundamental questions:
 2. **Have they reached their plan limits?**
 3. **How much do they owe?**
 
-In distributed environments and real-world payment ecosystems, simple billing implementations routinely fail due to network retries that cause double-charging, webhook delivery replays, ambiguous boundary conditions at exact quota limits, and floating-point financial drift.
+In distributed environments and real-world payment ecosystems, simple billing implementations routinely fail due to:
+- **Network retries** causing duplicate charges and overmetering when clients time out before receiving a response.
+- **Webhook replays** from payment providers triggering duplicate provisioning or corrupted subscription states.
+- **Ambiguous quota boundaries** (e.g. what occurs at call 999 vs 1,000 vs 1,001).
+- **Floating-point financial drift** where fractional penny additions corrupt financial statements and reconciliation audits.
 
 The mission of this engine is to build a lean, bulletproof backend service that guarantees:
 - **Exactly-once usage metering** with end-to-end idempotency-key deduplication.
@@ -23,7 +27,45 @@ The mission of this engine is to build a lean, bulletproof backend service that 
 
 ---
 
-## 2. Architecture & Layer Sketch
+## 2. Foundational References & Industry Standards
+
+This design directly applies the core principles established by industry-standard engineering literature:
+
+### A. Stripe: Designing APIs with Idempotency
+*Core insight: Retries are inevitable in distributed systems; idempotency keys make retries safe.*
+- **The Failure Mode**: A client issues a `POST /generate` request. The database commits the usage event, but a network blip occurs before the HTTP response reaches the client. The client's HTTP library automatically retries the request. Without idempotency, a second usage event is recorded, causing overcharging.
+- **The Design Pattern**:
+  1. Every mutating billable call requires an `Idempotency-Key` header (UUID).
+  2. The server creates a fingerprint (SHA-256 hash) of the request payload.
+  3. If the key is seen for the first time, processing proceeds inside an atomic database transaction.
+  4. Once processed, the exact HTTP status code and response payload are persisted in `idempotency_records`.
+  5. If a retry arrives with the same key and identical parameters, the server bypasses execution and **replays the cached response exactly** (satisfying **Acceptance Probe 1**).
+  6. If a retry arrives with the same key but different parameters, the server immediately returns `409 Conflict` (parameter mismatch error).
+
+### B. Stripe: Usage Metering: A Guide (Collection $\to$ Aggregation $\to$ Rating)
+*Core insight: Separate raw event ingestion from metric aggregation and financial rating.*
+- **Phase 1 — Collection (Ingestion)**:
+  - High-throughput, append-only intake of immutable events into `usage_events`.
+  - Captures raw quantities: fresh input tokens, cached input tokens, output tokens, reasoning tokens, and API calls with timestamps.
+  - Never mutates historical records.
+- **Phase 2 — Aggregation (Rollup)**:
+  - Summarizes raw usage events over the active subscription billing window (`current_period_start` to `current_period_end`).
+  - Powered by composite index `(tenant_id, type, created_at)` for sub-millisecond range queries without full table scans.
+- **Phase 3 — Rating & Billing (Cost & Quotas)**:
+  - Applies plan rates and rules (e.g. 75% discount on cached inputs; reasoning tokens billed as output tokens).
+  - Evaluates current usage against plan ceilings to allow or block incoming actions.
+
+### C. Modern Treasury: Floats Don't Work for Storing Cents
+*Core insight: IEEE 754 floating-point arithmetic is inherently inexact and strictly prohibited in financial ledgers.*
+- **The Floating-Point Problem**: In binary floating-point representation, values like $0.10$ or $0.01$ cannot be represented precisely ($0.1 + 0.2 = 0.30000000000000004$). In usage metering where millions of fractional AI token operations occur, compounding rounding errors result in irreconcilable ledger imbalances.
+- **The Integer Standard**:
+  - All currency amounts are stored and calculated strictly as **integers in microcents** ($1\text{ USD} = 100\text{ cents} = 100,000,000\text{ microcents}$).
+  - Unit rates for AI tokens are pinned as integer microcents per 1,000 tokens in `BIGINT` columns.
+  - Conversion to customer-facing currency displays occurs solely at presentation time by dividing by $100,000,000$.
+
+---
+
+## 3. Architecture & Layer Sketch
 
 The service adheres to a strict layered architecture where HTTP transport, domain logic, and persistence are cleanly decoupled.
 
@@ -37,8 +79,8 @@ The service adheres to a strict layered architecture where HTTP transport, domai
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         HTTP TRANSPORT & VALIDATION                         │
 │  • Express Router & Middlewares (Auth / Tenant Resolver, Boundary Validation)│
-│  • Idempotency Interceptor (Checks Idempotency-Key header)                  │
-│  • Stripe Webhook Signature Verification (raw body validation)              │
+│  • Idempotency Interceptor (Checks Idempotency-Key header & parameter hash) │
+│  • Stripe Webhook Signature Verification (raw binary body validation)       │
 └──────────────────────────────────────┬──────────────────────────────────────┘
                                        │
                                        ▼
@@ -46,7 +88,7 @@ The service adheres to a strict layered architecture where HTTP transport, domai
 │                        DOMAIN / SERVICE LAYER                               │
 │  ┌───────────────────────┐  ┌───────────────────────┐  ┌─────────────────┐  │
 │  │     MeterService      │  │     QuotaService      │  │  BillingService │  │
-│  │ (Record usage events, │  │ (Enforce limits, check│  │ (AI token math, │  │
+│  │ (Raw event collection,│  │ (Enforce limits, check│  │ (AI token math, │  │
 │  │  idempotency caching) │  │  boundary honesty)    │  │  cost rollups)  │  │
 │  └───────────────────────┘  └───────────────────────┘  └─────────────────┘  │
 │  ┌───────────────────────────────────────────────────────────────────────┐  │
@@ -58,19 +100,20 @@ The service adheres to a strict layered architecture where HTTP transport, domai
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                       PERSISTENCE LAYER (PostgreSQL)                        │
-│  • Transactions (ACID isolation for usage record + idempotency store)       │
-│  • Tenants, Plans, Subscriptions, UsageEvents, IdempotencyRecords, Events   │
+│  • ACID Transactions (atomic commit for usage_events + idempotency_records) │
+│  • Tables: tenants, plans, subscriptions, usage_events, idempotency_records │
+│  • Webhook replay tracking: processed_webhook_events                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Layer Responsibilities
 - **HTTP Transport Layer**: Parses incoming requests, validates input schemas (ensuring clean `4xx` responses and never unhandled `500`s), extracts headers (`X-Tenant-Id`, `Idempotency-Key`), and handles webhook cryptographic verification.
-- **Domain / Service Layer**: Contains pure business rules for quota evaluations, pricing math, and state transitions. No raw SQL or Express request objects leak into this layer.
+- **Domain / Service Layer**: Contains pure business rules for collection, rollup aggregation, pricing math, and state transitions. No raw SQL or Express request objects leak into this layer.
 - **Persistence Layer**: Executes transactional queries, handles unique constraint conflict resolution, and persists usage and event history.
 
 ---
 
-## 3. Database Schema & Data Model
+## 4. Database Schema & Data Model
 
 The PostgreSQL schema enforces multi-tenant data isolation, strict relational integrity, and deduplication guarantees.
 
@@ -143,7 +186,7 @@ erDiagram
 ### Schema Specification (DDL)
 
 ```sql
--- Tenants table
+-- Tenants table (Multi-tenant isolation root)
 CREATE TABLE tenants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
@@ -177,7 +220,7 @@ CREATE TABLE subscriptions (
     CONSTRAINT uq_tenant_active_subscription UNIQUE (tenant_id)
 );
 
--- Usage Events table (append-only ledger)
+-- Usage Events table (Collection layer: append-only immutable ledger)
 CREATE TABLE usage_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -189,9 +232,10 @@ CREATE TABLE usage_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_tenant_idempotency UNIQUE (tenant_id, idempotency_key)
 );
+-- Aggregation index for fast monthly rollups
 CREATE INDEX idx_usage_tenant_period ON usage_events (tenant_id, type, created_at);
 
--- Idempotency Records table (cached HTTP response for replay)
+-- Idempotency Records table (Response cache for identical replay)
 CREATE TABLE idempotency_records (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -205,7 +249,7 @@ CREATE TABLE idempotency_records (
 );
 CREATE INDEX idx_idempotency_lookup ON idempotency_records (tenant_id, idempotency_key);
 
--- Processed Stripe Webhook Events table (replay prevention)
+-- Processed Stripe Webhook Events table (Replay prevention)
 CREATE TABLE processed_webhook_events (
     id VARCHAR(255) PRIMARY KEY, -- Stripe evt_... ID
     event_type VARCHAR(100) NOT NULL,
@@ -215,7 +259,7 @@ CREATE TABLE processed_webhook_events (
 
 ---
 
-## 4. Plans & Quota Enforcement
+## 5. Plans & Quota Enforcement
 
 ### Plan Configurations
 
@@ -262,9 +306,9 @@ $$\text{Projected Usage} = \text{Current Period Usage} + \text{Requested Quantit
 
 ---
 
-## 5. Cost Calculation & AI Token Pricing Rules
+## 6. Cost Calculation & AI Token Pricing Rules
 
-### Financial Representation
+### Financial Representation (Modern Treasury Standard)
 > [!IMPORTANT]
 > **No Floating-Point Numbers**: Floating-point types (`FLOAT`, `DOUBLE`, `REAL`) introduce precision errors during repeated financial additions. All currency in this engine is stored as **integers in microcents** ($1\text{ USD} = 100\text{ cents} = 100,000,000\text{ microcents}$) and converted to cents only for customer-facing display.
 
@@ -284,9 +328,9 @@ const PRICING_CONFIG = {
   // $1.50 / 1M output tokens = 150,000 microcents / 1k tokens
   AI_TOKENS: {
     FRESH_INPUT_MICROCENTS_PER_1K: 50000,    // $0.50 per 1M tokens
-    CACHED_INPUT_MICROCENTS_PER_1K: 12500,   // $0.125 per 1M tokens (75% off)
+    CACHED_INPUT_MICROCENTS_PER_1K: 12500,   // $0.125 per 1M tokens (75% discount)
     OUTPUT_MICROCENTS_PER_1K: 150000,        // $1.50 per 1M tokens
-    REASONING_MICROCENTS_PER_1K: 150000      // Same as output tokens
+    REASONING_MICROCENTS_PER_1K: 150000      // Billed identically to output tokens
   },
   API_CALLS: {
     BASE_COST_MICROCENTS_PER_CALL: 1000      // $0.01 per 100 calls = 1000 microcents/call
@@ -301,7 +345,7 @@ Total quantity billed to quota = $\text{fresh\_input} + \text{cached\_input} + \
 
 ---
 
-## 6. The Metering API Contract & Idempotency Strategy
+## 7. The Metering API Contract & Idempotency Strategy
 
 ### End-to-End Idempotency Protocol (Probe 1)
 
@@ -318,11 +362,15 @@ sequenceDiagram
     Client->>Router: POST /api/v1/generate (Idempotency-Key: X, X-Tenant-Id: T)
     Router->>DB: SELECT * FROM idempotency_records WHERE tenant_id = T AND idempotency_key = X
     alt Record Exists (Retry)
-        DB-->>Router: Return stored response_status & response_body
-        Router-->>Client: Return cached response (Mirrored exactly, 0 side-effects)
+        alt Request Hash Matches
+            DB-->>Router: Return stored response_status & response_body
+            Router-->>Client: Return cached response (Mirrored exactly, 0 side-effects)
+        else Request Hash Mismatch
+            Router-->>Client: 409 Conflict ("Idempotency key reused with different parameters")
+        end
     else New Request
         Router->>Service: Execute billable action
-        Service->>DB: Check quota in current cycle
+        Service->>DB: Check quota in current cycle (Aggregation check)
         alt Quota Exceeded
             Service-->>Router: QuotaExceededError (429)
             Router-->>Client: 429 Too Many Requests
@@ -442,7 +490,7 @@ sequenceDiagram
 
 ---
 
-## 7. Explicit Non-Goals & Scope Boundaries
+## 8. Explicit Non-Goals & Scope Boundaries
 
 To guarantee high correctness and clean completion within the targeted budget, the following are explicitly designated as **non-goals**:
 1. **Live LLM Execution**: The service does not make outbound network requests to OpenAI, Anthropic, or Google Gemini. Token counts and categories are simulated numbers submitted to the billable endpoint.
@@ -453,12 +501,12 @@ To guarantee high correctness and clean completion within the targeted budget, t
 
 ---
 
-## 8. Verification Strategy & Acceptance Mapping
+## 9. Verification Strategy & Acceptance Mapping
 
-| Probe / Rule | Acceptance Requirement | Design Mechanism |
-| :--- | :--- | :--- |
-| **Probe 1** | Same billable request sent twice with 1 idempotency key records 1 event; 2nd response mirrors 1st. | `idempotency_records` table storing request hash, response status, and body within atomic DB transaction. |
-| **Probe 2** | Exact quota boundary honored; call 1000 allowed, call 1001 returns 429 with clear explanation. | Pre-action quota check (`current + req <= limit`). Explicit `429` with `Retry-After` header. |
-| **Probe 3** | Stripe test Checkout flips Free $\to$ Pro; `/usage` shows new limits. | `checkout.session.completed` webhook updates `subscriptions.plan_id = 'pro'`. `/usage` queries active plan. |
-| **Probe 4** | Forged webhook $\to$ 400; duplicate webhook replay $\to$ processed once. | Raw-body signature check; `processed_webhook_events` primary key conflict handling. |
-| **Probe 5** | Pinned pricing rules correctly compute cached-input and reasoning tokens; `/usage` matches. | Hardcoded integer pricing constants table in config; reasoning tokens charged at output rate. |
+| Probe / Rule | Acceptance Requirement | Design Mechanism | Reference Standard |
+| :--- | :--- | :--- | :--- |
+| **Probe 1** | Same billable request sent twice with 1 idempotency key records 1 event; 2nd response mirrors 1st. | `idempotency_records` table storing request hash, response status, and body within atomic DB transaction. | Stripe Idempotency Pattern |
+| **Probe 2** | Exact quota boundary honored; call 1000 allowed, call 1001 returns 429 with clear explanation. | Pre-action quota check (`current + req <= limit`). Explicit `429` with `Retry-After` header. | Boundary Honesty Semantics |
+| **Probe 3** | Stripe test Checkout flips Free $\to$ Pro; `/usage` shows new limits. | `checkout.session.completed` webhook updates `subscriptions.plan_id = 'pro'`. `/usage` queries active plan. | Stripe Webhooks Sync |
+| **Probe 4** | Forged webhook $\to$ 400; duplicate webhook replay $\to$ processed once. | Raw-body signature check; `processed_webhook_events` primary key conflict handling. | Stripe Webhook Idempotency |
+| **Probe 5** | Pinned pricing rules correctly compute cached-input and reasoning tokens; `/usage` matches. | Hardcoded integer pricing constants table in config; reasoning tokens charged at output rate. | Modern Treasury Integer Money Math |
