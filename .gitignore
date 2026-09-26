@@ -4,6 +4,12 @@ node_modules/
 # Environment
 .env
 
+# Database
+data/
+*.sqlite
+*.sqlite3
+*.db
+
 # OS
 .DS_Store
 Thumbs.db
@@ -16,6 +22,8 @@ Thumbs.db
 *.log
 npm-debug.log*
 
-# Build
+# Build & Scratch
 dist/
 build/
+scratch/
+.agent-logs/

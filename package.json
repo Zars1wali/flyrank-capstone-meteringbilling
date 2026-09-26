@@ -1,0 +1,32 @@
+{
+  "name": "flyrank-capstone-meteringbilling",
+  "version": "1.0.0",
+  "description": "A usage-based metering and billing API that tracks API calls, calculates costs, and manages customer billing cycles.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "migrate": "node src/db/migrate.js",
+    "seed": "node src/db/seed.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zars1wali/flyrank-capstone-meteringbilling.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Zars1wali/flyrank-capstone-meteringbilling/issues"
+  },
+  "homepage": "https://github.com/Zars1wali/flyrank-capstone-meteringbilling#readme",
+  "dependencies": {
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "pg": "^8.23.0",
+    "supertest": "^7.3.0",
+    "uuid": "^14.0.2",
+    "zod": "^4.6.5"
+  }
+}
