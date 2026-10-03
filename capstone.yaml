@@ -14,11 +14,26 @@ endpoints:
     path: /health
     description: Health check
   - method: POST
+    path: /generate
+    description: Record billable usage event with idempotency and quota check
+  - method: GET
+    path: /usage
+    description: Rollup usage events, limits, and cost breakdown
+  - method: POST
     path: /api/usage
-    description: Record usage event
+    description: Record usage event (compatibility alias)
   - method: GET
     path: /api/usage
-    description: List usage events
+    description: List usage events (compatibility alias)
+  - method: POST
+    path: /api/v1/checkout/session
+    description: Create Stripe test Checkout session for Pro upgrade
+  - method: POST
+    path: /webhooks/stripe
+    description: Signature-verified Stripe webhook handler with replay deduplication
+  - method: POST
+    path: /api/v1/jobs/reconcile
+    description: Trigger background reconciliation and quota alert job
   - method: POST
     path: /api/customers
     description: Create customer
@@ -30,7 +45,7 @@ endpoints:
     description: Get customer by ID
   - method: POST
     path: /api/billing/calculate
-    description: Calculate bill for customer
+    description: Calculate bill and pricing simulation
   - method: GET
     path: /api/billing/:customerId
-    description: Get billing summary
+    description: Get billing summary and itemized usage for customer

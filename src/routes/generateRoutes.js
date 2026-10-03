@@ -116,15 +116,51 @@ router.get('/usage', tenantContext, async (req, res, next) => {
       GROUP BY type
     `;
 
-    const result = await db.query(query, [tenantId, periodStart, periodEnd]);
+    const eventsQuery = `
+      SELECT 
+        id, 
+        type, 
+        quantity, 
+        calculated_cost_microcents, 
+        properties, 
+        created_at
+      FROM usage_events
+      WHERE tenant_id = $1
+        AND created_at >= $2
+        AND created_at <= $3
+      ORDER BY created_at DESC
+    `;
+
+    const [sumResult, eventsResult] = await Promise.all([
+      db.query(query, [tenantId, periodStart, periodEnd]),
+      db.query(eventsQuery, [tenantId, periodStart, periodEnd]),
+    ]);
+
     const metricsMap = {};
     let totalAccumulatedMicrocents = 0;
 
-    for (const row of result.rows) {
+    for (const row of sumResult.rows) {
       const qty = Number(row.total_quantity);
       const cost = Number(row.total_cost_microcents);
       metricsMap[row.type] = qty;
       totalAccumulatedMicrocents += cost;
+    }
+
+    const tokenBreakdown = {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_tokens: 0,
+    };
+
+    for (const ev of eventsResult.rows) {
+      const props = typeof ev.properties === 'string' ? JSON.parse(ev.properties) : ev.properties;
+      if (props && props.breakdown) {
+        tokenBreakdown.input_tokens += Number(props.breakdown.input_tokens || 0);
+        tokenBreakdown.cached_input_tokens += Number(props.breakdown.cached_input_tokens || 0);
+        tokenBreakdown.output_tokens += Number(props.breakdown.output_tokens || 0);
+        tokenBreakdown.reasoning_tokens += Number(props.breakdown.reasoning_tokens || 0);
+      }
     }
 
     const apiCallsUsed = metricsMap['api_call'] || 0;
@@ -133,7 +169,7 @@ router.get('/usage', tenantContext, async (req, res, next) => {
     const aiTokenLimit = sub.ai_token_limit || 100000;
 
     const totalCents = totalAccumulatedMicrocents / 1000000;
-    const dollarsDisplay = `$${(totalCents / 100).toFixed(2)}`;
+    const dollarsDisplay = `$${(totalAccumulatedMicrocents / 100000000).toFixed(2)}`;
 
     return res.status(200).json({
       tenant_id: tenantId,
@@ -160,8 +196,12 @@ router.get('/usage', tenantContext, async (req, res, next) => {
           percent_used: Number(((aiTokensUsed / aiTokenLimit) * 100).toFixed(2)),
         },
       },
+      token_breakdown: tokenBreakdown,
       total_accumulated_cost_microcents: totalAccumulatedMicrocents,
+      total_accumulated_cost_cents: totalCents,
       total_accumulated_cost_display: dollarsDisplay,
+      events_count: eventsResult.rows.length,
+      events: eventsResult.rows,
     });
   } catch (err) {
     next(err);

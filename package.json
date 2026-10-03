@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "migrate": "node src/db/migrate.js",
     "seed": "node src/db/seed.js",
+    "job:reconcile": "node src/jobs/reconciliationJob.js",
     "test": "node --test --test-concurrency=1 tests/*.test.js"
   },
   "repository": {
@@ -25,6 +26,7 @@
     "dotenv": "^18.0.4",
     "express": "^5.2.1",
     "pg": "^8.23.0",
+    "stripe": "^23.0.0",
     "supertest": "^7.3.0",
     "uuid": "^14.0.2",
     "zod": "^4.6.5"

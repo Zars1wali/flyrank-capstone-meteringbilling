@@ -8,7 +8,7 @@ const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   databaseUrl: process.env.DATABASE_URL || 'sqlite://./data/metering_billing.sqlite',
   stripeApiKey: process.env.STRIPE_API_KEY || 'sk_test_placeholder',
-  webhookSecret: process.env.WEBHOOK_SECRET || 'whsec_placeholder',
+  webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET || 'whsec_placeholder',
 };
 
 module.exports = config;
